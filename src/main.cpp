@@ -85,6 +85,38 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    if (args.size() >= 3 && args.at(1) == QStringLiteral("--self-test-key")) {
+        QList<std::uint32_t> keycodes;
+        for (int i = 2; i < args.size(); ++i) {
+            bool ok = false;
+            const uint keycode = args.at(i).toUInt(&ok);
+            if (!ok) {
+                qCritical() << "usage: hypr-kdeconnect-portal --self-test-key <evdev keycode> [<evdev keycode>...]";
+                return 2;
+            }
+            keycodes.append(keycode);
+        }
+
+        hkcf::WaylandInput input;
+        for (const std::uint32_t keycode : keycodes) {
+            if (!input.keyboardKeycode(keycode, true)) {
+                qCritical() << input.lastError();
+                return 1;
+            }
+            QThread::msleep(20);
+        }
+        QThread::msleep(50);
+        for (auto it = keycodes.crbegin(); it != keycodes.crend(); ++it) {
+            if (!input.keyboardKeycode(*it, false)) {
+                qCritical() << input.lastError();
+                return 1;
+            }
+            QThread::msleep(20);
+        }
+        QThread::msleep(150);
+        return 0;
+    }
+
     auto bus = QDBusConnection::sessionBus();
     if (!bus.isConnected()) {
         qCritical() << "failed to connect to session bus";
