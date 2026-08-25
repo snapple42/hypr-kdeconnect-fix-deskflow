@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include <QDebug>
+#include <QLoggingCategory>
 #include <QRect>
 #include <QSocketNotifier>
 
@@ -19,6 +20,9 @@
 #include <xkbcommon/xkbcommon.h>
 
 namespace hkcf {
+
+// Per-event tracing is off unless QT_LOGGING_RULES="hkcf.eis.debug=true" is set.
+Q_LOGGING_CATEGORY(lcEis, "hkcf.eis", QtInfoMsg)
 
 namespace {
 
@@ -63,36 +67,16 @@ bool writeAll(int fd, const char* data, std::size_t size) {
     return true;
 }
 
-std::optional<KeymapFd> createKeymapFd(QString* errorText) {
-    xkb_context* context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
-    if (!context) {
+std::optional<KeymapFd> createKeymapFd(const QByteArray& keymapText, QString* errorText) {
+    if (keymapText.isEmpty()) {
         if (errorText)
-            *errorText = QStringLiteral("failed to create xkb context");
+            *errorText = QStringLiteral("no xkb keymap available");
         return std::nullopt;
     }
 
-    xkb_keymap* keymap = xkb_keymap_new_from_names(context, nullptr, XKB_KEYMAP_COMPILE_NO_FLAGS);
-    if (!keymap) {
-        xkb_context_unref(context);
-        if (errorText)
-            *errorText = QStringLiteral("failed to create xkb keymap");
-        return std::nullopt;
-    }
-
-    char* keymapText = xkb_keymap_get_as_string(keymap, XKB_KEYMAP_FORMAT_TEXT_V1);
-    xkb_keymap_unref(keymap);
-    xkb_context_unref(context);
-
-    if (!keymapText) {
-        if (errorText)
-            *errorText = QStringLiteral("failed to serialize xkb keymap");
-        return std::nullopt;
-    }
-
-    const std::size_t size = std::strlen(keymapText) + 1;
+    const std::size_t size = static_cast<std::size_t>(keymapText.size()) + 1;
     const auto fd = createMemfd("hypr-kdeconnect-eis-keymap");
     if (!fd) {
-        free(keymapText);
         if (errorText)
             *errorText = QStringLiteral("failed to create keymap fd");
         return std::nullopt;
@@ -102,8 +86,7 @@ std::optional<KeymapFd> createKeymapFd(QString* errorText) {
     if (ftruncate(*fd, static_cast<off_t>(size)) != 0)
         ok = false;
     else
-        ok = writeAll(*fd, keymapText, size);
-    free(keymapText);
+        ok = writeAll(*fd, keymapText.constData(), size);
 
     if (!ok) {
         const QString text = QStringLiteral("failed to write keymap fd: %1").arg(QString::fromLocal8Bit(std::strerror(errno)));
@@ -190,8 +173,11 @@ bool EisInputBridge::ensureContext(QString* errorText) {
 void EisInputBridge::dispatch() {
     if (!m_eis)
         return;
+
     eis_dispatch(m_eis);
+
     while (eis_event* event = eis_get_event(m_eis)) {
+        qCDebug(lcEis) << "event type" << eis_event_get_type(event);
         handleEvent(event);
         eis_event_unref(event);
     }
@@ -220,8 +206,15 @@ void EisInputBridge::handleEvent(eis_event* event) {
     case EIS_EVENT_KEYBOARD_KEY:
         handleInputEvent(event);
         break;
-    case EIS_EVENT_SYNC:
     case EIS_EVENT_FRAME:
+        // libeis expects the modifier state to be reported once the frame that
+        // changed it has been processed, otherwise senders keep guessing.
+        if (m_keyStateChanged) {
+            m_keyStateChanged = false;
+            reportModifiers();
+        }
+        break;
+    case EIS_EVENT_SYNC:
     case EIS_EVENT_DEVICE_START_EMULATING:
     case EIS_EVENT_DEVICE_STOP_EMULATING:
     case EIS_EVENT_PONG:
@@ -235,6 +228,7 @@ void EisInputBridge::handleEvent(eis_event* event) {
 
 void EisInputBridge::handleClientConnect(eis_client* client) {
     if (!client || !eis_client_is_sender(client)) {
+        qCInfo(lcEis) << "rejecting non-sender EIS client";
         if (client)
             eis_client_disconnect(client);
         return;
@@ -243,8 +237,11 @@ void EisInputBridge::handleClientConnect(eis_client* client) {
     eis_client_connect(client);
 
     eis_seat* seat = eis_client_new_seat(client, "default");
-    if (!seat)
+    if (!seat) {
+        qCWarning(lcEis) << "failed to create EIS seat for client" << eis_client_get_name(client);
         return;
+    }
+    qCInfo(lcEis) << "EIS client connected:" << eis_client_get_name(client);
     eis_seat_configure_capability(seat, EIS_DEVICE_CAP_KEYBOARD);
     eis_seat_configure_capability(seat, EIS_DEVICE_CAP_POINTER);
     eis_seat_configure_capability(seat, EIS_DEVICE_CAP_POINTER_ABSOLUTE);
@@ -281,6 +278,9 @@ void EisInputBridge::handleSeatBind(eis_event* event) {
         state->pointer = addPointer(seat);
     if (eis_event_seat_has_capability(event, EIS_DEVICE_CAP_POINTER_ABSOLUTE) && !state->absolutePointer)
         state->absolutePointer = addAbsolutePointer(seat);
+
+    qCInfo(lcEis) << "EIS seat bound; devices: keyboard" << (state->keyboard != nullptr) << "pointer" << (state->pointer != nullptr)
+                  << "absolute pointer" << (state->absolutePointer != nullptr);
 }
 
 void EisInputBridge::handleDeviceClosed(eis_device* device) {
@@ -306,15 +306,27 @@ void EisInputBridge::handleDeviceClosed(eis_device* device) {
 
 void EisInputBridge::handleInputEvent(eis_event* event) {
     switch (eis_event_get_type(event)) {
-    case EIS_EVENT_POINTER_MOTION:
-        m_input.pointerMotion(eis_event_pointer_get_dx(event), eis_event_pointer_get_dy(event));
+    case EIS_EVENT_POINTER_MOTION: {
+        const double dx = eis_event_pointer_get_dx(event);
+        const double dy = eis_event_pointer_get_dy(event);
+        qCDebug(lcEis) << "pointer motion" << dx << dy;
+        m_input.pointerMotion(dx, dy);
         break;
-    case EIS_EVENT_POINTER_MOTION_ABSOLUTE:
-        m_input.pointerMotionAbsolute(eis_event_pointer_get_absolute_x(event), eis_event_pointer_get_absolute_y(event));
+    }
+    case EIS_EVENT_POINTER_MOTION_ABSOLUTE: {
+        const double x = eis_event_pointer_get_absolute_x(event);
+        const double y = eis_event_pointer_get_absolute_y(event);
+        qCDebug(lcEis) << "absolute pointer motion" << x << y;
+        m_input.pointerMotionAbsolute(x, y);
         break;
-    case EIS_EVENT_BUTTON_BUTTON:
-        m_input.pointerButton(eis_event_button_get_button(event), eis_event_button_get_is_press(event));
+    }
+    case EIS_EVENT_BUTTON_BUTTON: {
+        const uint32_t button = eis_event_button_get_button(event);
+        const bool pressed = eis_event_button_get_is_press(event);
+        qCDebug(lcEis) << "button" << button << pressed;
+        m_input.pointerButton(button, pressed);
         break;
+    }
     case EIS_EVENT_SCROLL_DELTA:
         if (const int x = wheelStep(eis_event_scroll_get_dx(event)); x != 0)
             m_input.pointerAxisDiscrete(1, x);
@@ -336,11 +348,26 @@ void EisInputBridge::handleInputEvent(eis_event* event) {
         if (eis_event_scroll_get_stop_y(event))
             m_input.pointerAxisDiscrete(0, 0);
         break;
-    case EIS_EVENT_KEYBOARD_KEY:
-        m_input.keyboardKeycode(eis_event_keyboard_get_key(event), eis_event_keyboard_get_key_is_press(event));
+    case EIS_EVENT_KEYBOARD_KEY: {
+        const uint32_t key = eis_event_keyboard_get_key(event);
+        const bool pressed = eis_event_keyboard_get_key_is_press(event);
+        qCDebug(lcEis) << "key" << key << pressed;
+        m_input.keyboardKeycode(key, pressed);
+        m_keyStateChanged = true;
         break;
+    }
     default:
         break;
+    }
+}
+
+void EisInputBridge::reportModifiers() {
+    const auto modifiers = m_input.modifierState();
+    qCDebug(lcEis) << "reporting modifiers" << modifiers.depressed << modifiers.latched << modifiers.locked << modifiers.group;
+
+    for (SeatState* state : std::as_const(m_seats)) {
+        if (state->keyboard)
+            eis_device_keyboard_send_xkb_modifiers(state->keyboard, modifiers.depressed, modifiers.latched, modifiers.locked, modifiers.group);
     }
 }
 
@@ -353,7 +380,7 @@ eis_device* EisInputBridge::addKeyboard(eis_seat* seat) {
     eis_device_configure_capability(device, EIS_DEVICE_CAP_KEYBOARD);
 
     QString errorText;
-    const auto fd = createKeymapFd(&errorText);
+    const auto fd = createKeymapFd(m_input.keymapText(), &errorText);
     if (!fd) {
         qWarning() << "failed to create EIS keyboard keymap:" << errorText;
         eis_device_unref(device);
@@ -395,6 +422,10 @@ eis_device* EisInputBridge::addAbsolutePointer(eis_seat* seat) {
     eis_device_configure_type(device, EIS_DEVICE_TYPE_VIRTUAL);
     eis_device_configure_name(device, "hypr-kdeconnect absolute pointer");
     eis_device_configure_capability(device, EIS_DEVICE_CAP_POINTER_ABSOLUTE);
+    // Senders such as Deskflow only adopt an absolute pointer that can also click and
+    // scroll, and ignore the device entirely when those capabilities are missing.
+    eis_device_configure_capability(device, EIS_DEVICE_CAP_BUTTON);
+    eis_device_configure_capability(device, EIS_DEVICE_CAP_SCROLL);
     configureRegion(device, m_input.logicalBounds());
     eis_device_add(device);
     eis_device_resume(device);

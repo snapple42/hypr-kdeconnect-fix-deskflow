@@ -27,7 +27,7 @@ inline QString normalizedAppId(const QString& appId) {
     return appId.trimmed();
 }
 
-inline bool isAllowedAppId(const QString& appId) {
+inline bool isAllowedKdeConnectAppId(const QString& appId) {
     const QString normalized = normalizedAppId(appId);
     if (normalized.isEmpty() || normalized.size() > kMaxAppIdLength)
         return false;
@@ -37,7 +37,19 @@ inline bool isAllowedAppId(const QString& appId) {
            normalized == QStringLiteral("org.kde.kdeconnect.nonplasma") || normalized == QStringLiteral("org.kde.kdeconnect.sms");
 }
 
-inline bool needsKdeConnectCallerFallback(const QString& appId) {
+inline bool isAllowedDeskflowAppId(const QString& appId) {
+    const QString normalized = normalizedAppId(appId);
+    if (normalized.isEmpty() || normalized.size() > kMaxAppIdLength)
+        return false;
+
+    return normalized == QStringLiteral("org.deskflow.deskflow") || normalized == QStringLiteral("org.deskflow.Deskflow");
+}
+
+inline bool isAllowedAppId(const QString& appId) {
+    return isAllowedKdeConnectAppId(appId) || isAllowedDeskflowAppId(appId);
+}
+
+inline bool needsCallerVerification(const QString& appId) {
     const QString normalized = normalizedAppId(appId);
     return normalized.isEmpty() || normalized == QStringLiteral("surface-transient");
 }
@@ -79,11 +91,25 @@ inline bool isAllowedFallbackExecutablePath(const QString& executablePath) {
            executablePath == QStringLiteral("/usr/libexec/kdeconnectd");
 }
 
+// Deskflow has no well-known bus name to cross-check the caller against, so trust is anchored
+// on the system-installed executable behind the calling D-Bus connection.
+inline bool isAllowedDeskflowExecutablePath(const QString& executablePath) {
+    return executablePath == QStringLiteral("/usr/bin/deskflow") || executablePath == QStringLiteral("/usr/bin/deskflow-core") ||
+           executablePath == QStringLiteral("/usr/bin/deskflow-server") || executablePath == QStringLiteral("/usr/bin/deskflow-client") ||
+           executablePath == QStringLiteral("/usr/local/bin/deskflow") || executablePath == QStringLiteral("/usr/local/bin/deskflow-core");
+}
+
 inline bool isAllowedFallbackProcess(const QString& executablePath,
                                      std::uint32_t senderPid,
                                      std::uint32_t kdeConnectOwnerPid,
                                      std::uint32_t kdeConnectDaemonOwnerPid) {
-    if (!isAllowedFallbackExecutablePath(executablePath) || senderPid == 0)
+    if (senderPid == 0)
+        return false;
+
+    if (isAllowedDeskflowExecutablePath(executablePath))
+        return true;
+
+    if (!isAllowedFallbackExecutablePath(executablePath))
         return false;
 
     return senderPid == kdeConnectOwnerPid || senderPid == kdeConnectDaemonOwnerPid;

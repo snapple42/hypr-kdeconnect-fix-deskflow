@@ -44,6 +44,7 @@ class EisInputBridge : public QObject {
     void handleSeatBind(eis_event* event);
     void handleDeviceClosed(eis_device* device);
     void handleInputEvent(eis_event* event);
+    void reportModifiers();
     eis_device* addKeyboard(eis_seat* seat);
     eis_device* addPointer(eis_seat* seat);
     eis_device* addAbsolutePointer(eis_seat* seat);
@@ -54,6 +55,7 @@ class EisInputBridge : public QObject {
     eis* m_eis = nullptr;
     QObject* m_notifier = nullptr;
     QHash<eis_seat*, SeatState*> m_seats;
+    bool m_keyStateChanged = false;
 };
 
 } // namespace hkcf

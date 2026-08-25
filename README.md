@@ -220,9 +220,13 @@ prompt on top of that, so it narrows the D-Bus attack surface instead:
 - RemoteDesktop and Session methods are accepted only from the current
   `org.freedesktop.portal.Desktop` owner.
 - Sessions are bound to that D-Bus sender and capped in number.
-- Accepted app ids are exact KDE Connect desktop ids; substring spoofing is
-  rejected. Empty and `surface-transient` ids are accepted only when the
-  session's D-Bus caller is verified as the system KDE Connect daemon process.
+- Accepted app ids are exact KDE Connect and Deskflow desktop ids; substring
+  spoofing is rejected. Empty and `surface-transient` ids are accepted only when
+  the session's D-Bus caller is verified through `/proc/<pid>/exe` as the system
+  KDE Connect daemon process or a system-installed Deskflow binary.
+- Caller verification requires reading `/proc/<pid>/exe` of the calling app, so
+  the systemd unit avoids filesystem sandboxing options that would place the
+  service in a user namespace and make that read fail.
 - Notify calls are checked against the selected device mask and bounded before
   being forwarded to Wayland.
 

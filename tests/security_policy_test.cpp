@@ -24,12 +24,14 @@ int main() {
     failures += expect(hkcf::security::isAllowedAppId(QStringLiteral("org.kde.kdeconnect")), "KDE Connect base app id should be allowed");
     failures += expect(hkcf::security::isAllowedAppId(QStringLiteral("org.kde.kdeconnect.daemon")), "KDE Connect daemon app id should be allowed");
     failures += expect(!hkcf::security::isAllowedAppId(QStringLiteral("surface-transient")), "transient fallback should require caller verification");
-    failures += expect(hkcf::security::needsKdeConnectCallerFallback(QStringLiteral("surface-transient")),
+    failures += expect(hkcf::security::needsCallerVerification(QStringLiteral("surface-transient")),
                        "known KDE Connect transient fallback should use caller verification");
-    failures += expect(hkcf::security::needsKdeConnectCallerFallback(QString()), "empty app id should use caller verification");
+    failures += expect(hkcf::security::needsCallerVerification(QString()), "empty app id should use caller verification");
     failures += expect(!hkcf::security::isAllowedAppId(QString()), "empty app id should be denied");
     failures += expect(!hkcf::security::isAllowedAppId(QStringLiteral("evil.kdeconnect")), "substring app id spoof should be denied");
     failures += expect(!hkcf::security::isAllowedAppId(QStringLiteral("org.kde.kdeconnect.evil")), "unknown KDE Connect-like suffix should be denied");
+    failures += expect(hkcf::security::isAllowedAppId(QStringLiteral("org.deskflow.deskflow")), "Deskflow app id should be allowed");
+    failures += expect(!hkcf::security::isAllowedAppId(QStringLiteral("org.deskflow.deskflow.evil")), "unknown Deskflow-like suffix should be denied");
 
     failures += expect(hkcf::security::isValidSessionPath(QStringLiteral("/org/freedesktop/portal/desktop/session/app/token")),
                        "valid portal session path should be accepted");
@@ -81,6 +83,14 @@ int main() {
                        "a matching pid should not allow an untrusted executable path");
     failures += expect(!hkcf::security::isAllowedFallbackProcess(QStringLiteral("/usr/bin/kdeconnectd"), 0, 0, 0),
                        "missing process ids should not be allowed");
+    failures += expect(hkcf::security::isAllowedDeskflowExecutablePath(QStringLiteral("/usr/bin/deskflow-core")),
+                       "system Deskflow core should be allowed as an app-id fallback");
+    failures += expect(!hkcf::security::isAllowedDeskflowExecutablePath(QStringLiteral("/tmp/deskflow-core")),
+                       "Deskflow copies outside system paths should not be allowed");
+    failures += expect(hkcf::security::isAllowedFallbackProcess(QStringLiteral("/usr/bin/deskflow-core"), 1200, 0, 0),
+                       "Deskflow should be allowed without a KDE Connect bus owner");
+    failures += expect(!hkcf::security::isAllowedFallbackProcess(QStringLiteral("/usr/bin/deskflow-core"), 0, 0, 0),
+                       "Deskflow without a resolvable pid should not be allowed");
 
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

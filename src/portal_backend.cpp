@@ -114,21 +114,26 @@ std::optional<std::uint32_t> processIdForBusService(const QDBusConnection& conne
     return pid.value();
 }
 
-QString verifiedKdeConnectExecutablePath(const QDBusConnection& connection, const QString& senderBusName) {
+struct CallerInfo {
+    QString executablePath;
+    bool trusted = false;
+};
+
+CallerInfo inspectCaller(const QDBusConnection& connection, const QString& senderBusName) {
     const auto senderPid = processIdForBusService(connection, senderBusName);
     if (!senderPid)
         return {};
 
-    const QString executablePath = QFileInfo(QStringLiteral("/proc/%1/exe").arg(*senderPid)).symLinkTarget();
+    CallerInfo caller;
+    caller.executablePath = QFileInfo(QStringLiteral("/proc/%1/exe").arg(*senderPid)).symLinkTarget();
+
     const std::uint32_t kdeConnectOwnerPid =
         processIdForBusService(connection, QStringLiteral("org.kde.kdeconnect")).value_or(0);
     const std::uint32_t kdeConnectDaemonOwnerPid =
         processIdForBusService(connection, QStringLiteral("org.kde.kdeconnect.daemon")).value_or(0);
 
-    if (!security::isAllowedFallbackProcess(executablePath, *senderPid, kdeConnectOwnerPid, kdeConnectDaemonOwnerPid))
-        return {};
-
-    return executablePath;
+    caller.trusted = security::isAllowedFallbackProcess(caller.executablePath, *senderPid, kdeConnectOwnerPid, kdeConnectDaemonOwnerPid);
+    return caller;
 }
 
 void sendPortalRequestResponse(const QDBusConnection& connection, const QDBusMessage& response) {
@@ -453,6 +458,7 @@ bool PortalBackend::handleRemoteDesktop(const QDBusMessage& message, const QDBus
         QDBusUnixFileDescriptor descriptor;
         descriptor.giveFileDescriptor(*fd);
         session->eisConnected = true;
+        qInfo() << "handing EIS socket to" << safeForLog(session->appId) << "for session" << sessionHandle->path();
         connection.send(message.createReply(QVariant::fromValue(descriptor)));
         return true;
     }
@@ -713,18 +719,20 @@ bool PortalBackend::isAllowedApp(const QString& appId, const QString& sessionPat
     if (security::isAllowedAppId(appId))
         return true;
 
-    if (!security::needsKdeConnectCallerFallback(appId))
+    if (!security::needsCallerVerification(appId))
         return false;
 
     const auto senderBusName = security::senderBusNameFromSessionPath(sessionPath);
     if (!senderBusName)
         return false;
 
-    const QString executablePath = verifiedKdeConnectExecutablePath(connection, *senderBusName);
-    if (executablePath.isEmpty())
+    const CallerInfo caller = inspectCaller(connection, *senderBusName);
+    if (!caller.trusted) {
+        qWarning() << "untrusted RemoteDesktop caller" << *senderBusName << "executable" << safeForLog(caller.executablePath);
         return false;
+    }
 
-    qInfo() << "allowing RemoteDesktop session with fallback app id" << safeForLog(appId) << "from" << executablePath << *senderBusName;
+    qInfo() << "allowing RemoteDesktop session with fallback app id" << safeForLog(appId) << "from" << caller.executablePath << *senderBusName;
     return true;
 }
 

@@ -35,10 +35,18 @@ foreach(required
   "Type=dbus"
   "BusName=org.freedesktop.impl.portal.desktop.hypr_kdeconnect"
   "NoNewPrivileges=true"
-  "PrivateTmp=true"
+  "SystemCallFilter=@system-service"
   "RestrictAddressFamilies=AF_UNIX"
 )
   if(NOT systemd_service_content MATCHES "${required}")
     message(FATAL_ERROR "systemd unit missing expected hardening or bus setting: ${required}")
+  endif()
+endforeach()
+
+# These options put a user service in a user namespace, where /proc/<pid>/exe of the
+# calling app cannot be read and caller verification always fails.
+foreach(forbidden "PrivateTmp=true" "ProtectSystem=" "ProtectHome=")
+  if(systemd_service_content MATCHES "\n${forbidden}")
+    message(FATAL_ERROR "systemd unit uses mount namespacing that breaks caller verification: ${forbidden}")
   endif()
 endforeach()

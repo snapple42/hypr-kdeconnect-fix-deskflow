@@ -42,6 +42,15 @@ const wl_registry_listener kRegistryListener = {
     .global_remove = WaylandInput::handleGlobalRemove,
 };
 
+const wl_keyboard_listener kKeyboardListener = {
+    .keymap = WaylandInput::keyboardKeymap,
+    .enter = WaylandInput::keyboardEnter,
+    .leave = WaylandInput::keyboardLeave,
+    .key = WaylandInput::keyboardKey,
+    .modifiers = WaylandInput::keyboardModifiers,
+    .repeat_info = WaylandInput::keyboardRepeatInfo,
+};
+
 const wl_output_listener kOutputListener = {
     .geometry = WaylandInput::outputGeometry,
     .mode = WaylandInput::outputMode,
@@ -158,6 +167,14 @@ bool WaylandInput::connect() {
         return false;
     }
 
+    if (!m_seatKeyboard) {
+        m_seatKeyboard = wl_seat_get_keyboard(m_seat);
+        if (m_seatKeyboard) {
+            wl_keyboard_add_listener(m_seatKeyboard, &kKeyboardListener, this);
+            wl_display_roundtrip(m_display);
+        }
+    }
+
     return true;
 }
 
@@ -195,33 +212,88 @@ bool WaylandInput::createDevices() {
     return true;
 }
 
-bool WaylandInput::sendKeyboardKeymap() {
+QByteArray WaylandInput::keymapText() {
+    if (m_seatKeymapText.isEmpty() && m_display)
+        wl_display_roundtrip(m_display);
+    if (!m_seatKeymapText.isEmpty())
+        return m_seatKeymapText;
+
     xkb_context* context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
-    if (!context) {
-        setError(QStringLiteral("failed to create xkb context"));
-        return false;
-    }
+    if (!context)
+        return {};
 
     xkb_keymap* keymap = xkb_keymap_new_from_names(context, nullptr, XKB_KEYMAP_COMPILE_NO_FLAGS);
     if (!keymap) {
         xkb_context_unref(context);
-        setError(QStringLiteral("failed to create xkb keymap"));
-        return false;
+        return {};
     }
 
-    char* keymapText = xkb_keymap_get_as_string(keymap, XKB_KEYMAP_FORMAT_TEXT_V1);
+    char* text = xkb_keymap_get_as_string(keymap, XKB_KEYMAP_FORMAT_TEXT_V1);
     xkb_keymap_unref(keymap);
     xkb_context_unref(context);
+    if (!text)
+        return {};
 
-    if (!keymapText) {
-        setError(QStringLiteral("failed to serialize xkb keymap"));
+    QByteArray result(text);
+    free(text);
+    return result;
+}
+
+void WaylandInput::ensureKeymapState() {
+    if (m_xkbState)
+        return;
+
+    const QByteArray text = keymapText();
+    if (text.isEmpty())
+        return;
+
+    if (!m_xkbContext)
+        m_xkbContext = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+    if (!m_xkbContext)
+        return;
+
+    if (!m_xkbKeymap) {
+        m_xkbKeymap =
+            xkb_keymap_new_from_string(m_xkbContext, text.constData(), XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS);
+    }
+    if (!m_xkbKeymap)
+        return;
+
+    m_xkbState = xkb_state_new(m_xkbKeymap);
+}
+
+WaylandInput::XkbModifiers WaylandInput::modifierState() const {
+    return m_modifiers;
+}
+
+bool WaylandInput::sendModifiers() {
+    if (!m_xkbState || !m_keyboard)
+        return true;
+
+    const XkbModifiers current{
+        xkb_state_serialize_mods(m_xkbState, XKB_STATE_MODS_DEPRESSED),
+        xkb_state_serialize_mods(m_xkbState, XKB_STATE_MODS_LATCHED),
+        xkb_state_serialize_mods(m_xkbState, XKB_STATE_MODS_LOCKED),
+        xkb_state_serialize_layout(m_xkbState, XKB_STATE_LAYOUT_EFFECTIVE),
+    };
+    if (current == m_modifiers)
+        return true;
+
+    m_modifiers = current;
+    zwp_virtual_keyboard_v1_modifiers(m_keyboard, current.depressed, current.latched, current.locked, current.group);
+    return flush();
+}
+
+bool WaylandInput::sendKeyboardKeymap() {
+    const QByteArray keymap = keymapText();
+    if (keymap.isEmpty()) {
+        setError(QStringLiteral("failed to obtain an xkb keymap"));
         return false;
     }
 
-    const std::size_t size = std::strlen(keymapText) + 1;
+    const std::size_t size = static_cast<std::size_t>(keymap.size()) + 1;
     const auto fd = createMemfd("hypr-kdeconnect-keymap");
     if (!fd) {
-        free(keymapText);
         setError(QStringLiteral("failed to create keymap fd"));
         return false;
     }
@@ -230,9 +302,7 @@ bool WaylandInput::sendKeyboardKeymap() {
     if (ftruncate(*fd, static_cast<off_t>(size)) != 0)
         ok = false;
     else
-        ok = writeAll(*fd, keymapText, size);
-
-    free(keymapText);
+        ok = writeAll(*fd, keymap.constData(), size);
 
     if (!ok) {
         const QString error = QStringLiteral("failed to write keymap fd: %1").arg(QString::fromLocal8Bit(std::strerror(errno)));
@@ -352,6 +422,14 @@ bool WaylandInput::keyboardKeycode(std::uint32_t keycode, bool pressed) {
     if (!ensureReady())
         return false;
 
+    ensureKeymapState();
+    if (m_xkbState) {
+        // xkb keycodes are evdev keycodes offset by 8.
+        xkb_state_update_key(m_xkbState, keycode + 8, pressed ? XKB_KEY_DOWN : XKB_KEY_UP);
+        if (!sendModifiers())
+            return false;
+    }
+
     zwp_virtual_keyboard_v1_key(m_keyboard, timeMs(), keycode, pressed ? kKeyboardKeyPressed : kKeyboardKeyReleased);
     return flush();
 }
@@ -428,6 +506,22 @@ bool WaylandInput::flush() {
 }
 
 void WaylandInput::cleanup() {
+    if (m_xkbState) {
+        xkb_state_unref(m_xkbState);
+        m_xkbState = nullptr;
+    }
+    if (m_xkbKeymap) {
+        xkb_keymap_unref(m_xkbKeymap);
+        m_xkbKeymap = nullptr;
+    }
+    if (m_xkbContext) {
+        xkb_context_unref(m_xkbContext);
+        m_xkbContext = nullptr;
+    }
+    if (m_seatKeyboard) {
+        wl_keyboard_destroy(m_seatKeyboard);
+        m_seatKeyboard = nullptr;
+    }
     if (m_keyboard) {
         zwp_virtual_keyboard_v1_destroy(m_keyboard);
         m_keyboard = nullptr;
@@ -489,6 +583,40 @@ void WaylandInput::handleGlobal(void* data, wl_registry* registry, std::uint32_t
 }
 
 void WaylandInput::handleGlobalRemove(void*, wl_registry*, std::uint32_t) {
+}
+
+void WaylandInput::keyboardKeymap(void* data, wl_keyboard*, std::uint32_t format, int32_t fd, std::uint32_t size) {
+    auto* self = static_cast<WaylandInput*>(data);
+    if (fd < 0)
+        return;
+
+    if (format != kKeyboardKeymapFormatXkbV1 || size == 0) {
+        close(fd);
+        return;
+    }
+
+    void* mapped = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (mapped != MAP_FAILED) {
+        const char* text = static_cast<const char*>(mapped);
+        self->m_seatKeymapText = QByteArray(text, static_cast<qsizetype>(strnlen(text, size)));
+        munmap(mapped, size);
+    }
+    close(fd);
+}
+
+void WaylandInput::keyboardEnter(void*, wl_keyboard*, std::uint32_t, wl_surface*, wl_array*) {
+}
+
+void WaylandInput::keyboardLeave(void*, wl_keyboard*, std::uint32_t, wl_surface*) {
+}
+
+void WaylandInput::keyboardKey(void*, wl_keyboard*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t) {
+}
+
+void WaylandInput::keyboardModifiers(void*, wl_keyboard*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t) {
+}
+
+void WaylandInput::keyboardRepeatInfo(void*, wl_keyboard*, int32_t, int32_t) {
 }
 
 void WaylandInput::outputGeometry(void* data,
