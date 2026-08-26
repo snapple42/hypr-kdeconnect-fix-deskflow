@@ -213,10 +213,19 @@ bool WaylandInput::createDevices() {
 }
 
 QByteArray WaylandInput::keymapText() {
-    if (m_seatKeymapText.isEmpty() && m_display)
+    if (!m_seatKeymapText.isEmpty())
+        return m_seatKeymapText;
+
+    if (m_display)
         wl_display_roundtrip(m_display);
     if (!m_seatKeymapText.isEmpty())
         return m_seatKeymapText;
+
+    // Fallback for compositors that never deliver a wl_keyboard.keymap event.
+    // Compile once and cache: without this, every keystroke pays a full
+    // wl_display_roundtrip plus an xkb context/keymap allocation.
+    if (!m_fallbackKeymapText.isEmpty())
+        return m_fallbackKeymapText;
 
     xkb_context* context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
     if (!context)
@@ -234,9 +243,9 @@ QByteArray WaylandInput::keymapText() {
     if (!text)
         return {};
 
-    QByteArray result(text);
+    m_fallbackKeymapText = QByteArray(text);
     free(text);
-    return result;
+    return m_fallbackKeymapText;
 }
 
 void WaylandInput::ensureKeymapState() {
@@ -598,8 +607,25 @@ void WaylandInput::keyboardKeymap(void* data, wl_keyboard*, std::uint32_t format
     void* mapped = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
     if (mapped != MAP_FAILED) {
         const char* text = static_cast<const char*>(mapped);
-        self->m_seatKeymapText = QByteArray(text, static_cast<qsizetype>(strnlen(text, size)));
+        const QByteArray newText(text, static_cast<qsizetype>(strnlen(text, size)));
         munmap(mapped, size);
+        if (newText != self->m_seatKeymapText) {
+            self->m_seatKeymapText = newText;
+            // The cached xkb objects were compiled from the previous keymap; decoding
+            // modifier/group state against a stale keymap reports garbage to EIS clients.
+            // Drop them so ensureKeymapState() rebuilds from the new text. The fresh
+            // xkb_state starts with zeroed modifiers, which differs from (or coincides
+            // harmlessly with) the stale baseline in m_modifiers, so sendModifiers()
+            // re-syncs clients on the next frame automatically — no explicit reset needed.
+            if (self->m_xkbState) {
+                xkb_state_unref(self->m_xkbState);
+                self->m_xkbState = nullptr;
+            }
+            if (self->m_xkbKeymap) {
+                xkb_keymap_unref(self->m_xkbKeymap);
+                self->m_xkbKeymap = nullptr;
+            }
+        }
     }
     close(fd);
 }

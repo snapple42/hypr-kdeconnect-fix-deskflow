@@ -93,10 +93,16 @@ inline bool isAllowedFallbackExecutablePath(const QString& executablePath) {
 
 // Deskflow has no well-known bus name to cross-check the caller against, so trust is anchored
 // on the system-installed executable behind the calling D-Bus connection.
+// /app/bin/deskflow covers the Flatpak install: /app is immutable and only writable by the
+// packaged application, so it anchors trust as strongly as /usr/bin. System-extension
+// installs under /usr/lib/extensions are deliberately NOT matched — that prefix would
+// allow any extension, not just Deskflow. Unknown paths are rejected; inspectCaller()
+// logs the observed path when verification fails.
 inline bool isAllowedDeskflowExecutablePath(const QString& executablePath) {
     return executablePath == QStringLiteral("/usr/bin/deskflow") || executablePath == QStringLiteral("/usr/bin/deskflow-core") ||
            executablePath == QStringLiteral("/usr/bin/deskflow-server") || executablePath == QStringLiteral("/usr/bin/deskflow-client") ||
-           executablePath == QStringLiteral("/usr/local/bin/deskflow") || executablePath == QStringLiteral("/usr/local/bin/deskflow-core");
+           executablePath == QStringLiteral("/usr/local/bin/deskflow") || executablePath == QStringLiteral("/usr/local/bin/deskflow-core") ||
+           executablePath == QStringLiteral("/app/bin/deskflow");
 }
 
 inline bool isAllowedFallbackProcess(const QString& executablePath,

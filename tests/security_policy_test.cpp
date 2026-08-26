@@ -85,6 +85,8 @@ int main() {
                        "missing process ids should not be allowed");
     failures += expect(hkcf::security::isAllowedDeskflowExecutablePath(QStringLiteral("/usr/bin/deskflow-core")),
                        "system Deskflow core should be allowed as an app-id fallback");
+    failures += expect(hkcf::security::isAllowedDeskflowExecutablePath(QStringLiteral("/app/bin/deskflow")),
+                       "Flatpak-installed Deskflow should be allowed as an app-id fallback");
     failures += expect(!hkcf::security::isAllowedDeskflowExecutablePath(QStringLiteral("/tmp/deskflow-core")),
                        "Deskflow copies outside system paths should not be allowed");
     failures += expect(hkcf::security::isAllowedFallbackProcess(QStringLiteral("/usr/bin/deskflow-core"), 1200, 0, 0),

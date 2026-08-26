@@ -223,10 +223,23 @@ prompt on top of that, so it narrows the D-Bus attack surface instead:
 - Accepted app ids are exact KDE Connect and Deskflow desktop ids; substring
   spoofing is rejected. Empty and `surface-transient` ids are accepted only when
   the session's D-Bus caller is verified through `/proc/<pid>/exe` as the system
-  KDE Connect daemon process or a system-installed Deskflow binary.
-- Caller verification requires reading `/proc/<pid>/exe` of the calling app, so
-  the systemd unit avoids filesystem sandboxing options that would place the
-  service in a user namespace and make that read fail.
+  KDE Connect daemon process or a known-good installed Deskflow binary
+  (`/usr/bin`, `/usr/local/bin`, or the Flatpak `/app/bin`). Custom-built
+  Deskflow binaries in other locations are rejected by design; when that happens
+  the backend logs the observed executable path so misconfiguration is visible
+  in the journal instead of failing silently.
+- Caller verification requires reading `/proc/<pid>/exe` of the calling app through
+  the systemd user manager.
+- **Filesystem sandboxing is deliberately absent from the systemd unit.** Options
+  such as `PrivateTmp=true`, `ProtectSystem=strict`, and `ProtectHome=true` would
+  place the service in a mount namespace under a user manager, making that
+  `/proc/<pid>/exe` read fail — so they were traded away to keep caller
+  verification working. This is a real loss of confinement: the portal backend
+  can read and write files anywhere your user can. The hardening that *is*
+  enabled (`SystemCallFilter=@system-service`, `RestrictNamespaces`,
+  `MemoryDenyWriteExecute`, `NoNewPrivileges`, ...) restricts kernel attack
+  surface only; it does **not** restrict filesystem access. Do not treat this
+  unit as filesystem-sandboxed.
 - Notify calls are checked against the selected device mask and bounded before
   being forwarded to Wayland.
 

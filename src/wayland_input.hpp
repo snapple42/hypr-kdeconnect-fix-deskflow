@@ -120,6 +120,7 @@ class WaylandInput {
     std::uint32_t m_keyboardManagerVersion = 1;
     OutputInfo m_outputInfo;
     QByteArray m_seatKeymapText;
+    QByteArray m_fallbackKeymapText;
     xkb_context* m_xkbContext = nullptr;
     xkb_keymap* m_xkbKeymap = nullptr;
     xkb_state* m_xkbState = nullptr;

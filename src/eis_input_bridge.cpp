@@ -379,6 +379,10 @@ eis_device* EisInputBridge::addKeyboard(eis_seat* seat) {
     eis_device_configure_name(device, "hypr-kdeconnect keyboard");
     eis_device_configure_capability(device, EIS_DEVICE_CAP_KEYBOARD);
 
+    // WARNING: keymapText() can run wl_display_roundtrip(), which performs nested
+    // Wayland dispatch. This is only safe here because handleSeatBind() runs from the
+    // EIS socket notifier, not from a Wayland listener callback. Never call this from
+    // inside a wl_* event handler: re-entrant dispatch corrupts event ordering.
     QString errorText;
     const auto fd = createKeymapFd(m_input.keymapText(), &errorText);
     if (!fd) {
